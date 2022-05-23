@@ -248,6 +248,11 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
 
     protected function parseAmountFromString(mixed $amount): mixed
     {
+        // Check if is using the ext-decimal and convert to string
+        if (class_exists('\Decimal\Decimal') && is_a($amount, '\Decimal\Decimal')) {
+            $amount = $amount->toString();
+        }
+
         if (!is_string($amount)) {
             return $amount;
         }
