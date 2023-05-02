@@ -3,6 +3,7 @@
 namespace Akaunting\Money;
 
 use Akaunting\Money\Casts\MoneyCast;
+use Akaunting\Money\Exceptions\UnexpectedAmountException;
 use BadFunctionCallException;
 use Closure;
 use Illuminate\Contracts\Database\Eloquent\Castable;
@@ -10,10 +11,10 @@ use Illuminate\Contracts\Database\Eloquent\CastsAttributes;
 use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Contracts\Support\Jsonable;
 use Illuminate\Contracts\Support\Renderable;
+use Illuminate\Support\Traits\Macroable;
 use InvalidArgumentException;
 use JsonSerializable;
 use OutOfBoundsException;
-use UnexpectedValueException;
 
 /**
  * Class Money.
@@ -185,6 +186,8 @@ use UnexpectedValueException;
  */
 class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderable
 {
+    use Macroable;
+
     const ROUND_HALF_UP = PHP_ROUND_HALF_UP;
 
     const ROUND_HALF_DOWN = PHP_ROUND_HALF_DOWN;
@@ -199,12 +202,12 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
 
     protected bool $mutable = false;
 
-    protected static ?string $locale;
+    protected static string $locale;
 
     /**
      * Create a new instance.
      *
-     * @throws UnexpectedValueException
+     * @throws UnexpectedAmountException
      */
     public function __construct(mixed $amount, Currency $currency, bool $convert = false)
     {
@@ -215,7 +218,7 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
     /**
      * parseAmount.
      *
-     * @throws UnexpectedValueException
+     * @throws UnexpectedAmountException
      */
     protected function parseAmount(mixed $amount, bool $convert = false): int|float
     {
@@ -234,7 +237,7 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
             return $this->convertAmount($amount->getAmount(), $convert);
         }
 
-        throw new UnexpectedValueException('Invalid amount "' . $amount . '"');
+        throw new UnexpectedAmountException('Invalid amount "' . $amount . '"');
     }
 
     protected function parseAmountFromCallable(mixed $amount): mixed
@@ -302,7 +305,7 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
 
     public static function getLocale(): string
     {
-        if (!isset(static::$locale)) {
+        if (empty(static::$locale)) {
             static::$locale = 'en_GB';
         }
 
@@ -311,7 +314,7 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
 
     public static function setLocale(?string $locale): void
     {
-        static::$locale = $locale;
+        static::$locale = str_replace('-', '_', (string) $locale);
     }
 
     /**
@@ -490,6 +493,9 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
         return $this;
     }
 
+    /**
+     * @psalm-suppress ArgumentTypeCoercion
+     */
     public function round(int|float $amount, int $mode = self::ROUND_HALF_UP): float
     {
         $this->assertRoundingMode($mode);
@@ -535,38 +541,6 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
         return $this->amount < 0;
     }
 
-    /**
-     * formatLocale.
-     *
-     * @throws BadFunctionCallException
-     */
-    public function formatLocale(?string $locale = null, ?Closure $callback = null): string
-    {
-        // @codeCoverageIgnoreStart
-        if (!class_exists('\NumberFormatter')) {
-            throw new BadFunctionCallException('Class NumberFormatter not exists. Require ext-intl extension.');
-        }
-        // @codeCoverageIgnoreEnd
-
-        $formatter = new \NumberFormatter($locale ?: static::getLocale(), \NumberFormatter::CURRENCY);
-
-        if (is_callable($callback)) {
-            $callback($formatter);
-        }
-
-        return $formatter->formatCurrency($this->getValue(), $this->currency->getCurrency());
-    }
-
-    public function formatSimple(): string
-    {
-        return number_format(
-            $this->getValue(),
-            $this->currency->getPrecision(),
-            $this->currency->getDecimalMark(),
-            $this->currency->getThousandsSeparator()
-        );
-    }
-
     public function format(): string
     {
         $negative = $this->isNegative();
@@ -579,6 +553,16 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
         $value = number_format($amount, $this->currency->getPrecision(), $decimals, $thousands);
 
         return ($negative ? '-' : '') . $prefix . $value . $suffix;
+    }
+
+    public function formatSimple(): string
+    {
+        return number_format(
+            $this->getValue(),
+            $this->currency->getPrecision(),
+            $this->currency->getDecimalMark(),
+            $this->currency->getThousandsSeparator()
+        );
     }
 
     public function formatWithoutZeroes(): string
@@ -597,6 +581,64 @@ class Money implements Arrayable, Castable, Jsonable, JsonSerializable, Renderab
         $value = number_format($amount, 0, $decimals, $thousands);
 
         return ($negative ? '-' : '') . $prefix . $value . $suffix;
+    }
+
+    /**
+     * formatForHumans.
+     *
+     * @throws BadFunctionCallException
+     */
+    public function formatForHumans(?string $locale = null, ?Closure $callback = null): string
+    {
+        // @codeCoverageIgnoreStart
+        if (! class_exists('\NumberFormatter')) {
+            throw new BadFunctionCallException('Class NumberFormatter not exists. Require ext-intl extension.');
+        }
+        // @codeCoverageIgnoreEnd
+
+        $negative = $this->isNegative();
+        $value = $this->getValue();
+        $amount = $negative ? -$value : $value;
+        $prefix = $this->currency->getPrefix();
+        $suffix = $this->currency->getSuffix();
+
+        $formatter = new \NumberFormatter($locale ?: static::getLocale(), \NumberFormatter::PADDING_POSITION);
+
+        $formatter->setSymbol(\NumberFormatter::DECIMAL_SEPARATOR_SYMBOL, $this->currency->getDecimalMark());
+        $formatter->setSymbol(\NumberFormatter::GROUPING_SEPARATOR_SYMBOL, $this->currency->getThousandsSeparator());
+        $formatter->setAttribute(\NumberFormatter::MAX_FRACTION_DIGITS, $this->currency->getPrecision());
+
+        if (is_callable($callback)) {
+            $callback($formatter);
+        }
+
+        return ($negative ? '-' : '') . $prefix . $formatter->format($amount) . $suffix;
+    }
+
+    /**
+     * formatLocale.
+     *
+     * @throws BadFunctionCallException
+     */
+    public function formatLocale(?string $locale = null, ?Closure $callback = null): string
+    {
+        // @codeCoverageIgnoreStart
+        if (! class_exists('\NumberFormatter')) {
+            throw new BadFunctionCallException('Class NumberFormatter not exists. Require ext-intl extension.');
+        }
+        // @codeCoverageIgnoreEnd
+
+        $formatter = new \NumberFormatter($locale ?: static::getLocale(), \NumberFormatter::CURRENCY);
+
+        $formatter->setSymbol(\NumberFormatter::DECIMAL_SEPARATOR_SYMBOL, $this->currency->getDecimalMark());
+        $formatter->setSymbol(\NumberFormatter::GROUPING_SEPARATOR_SYMBOL, $this->currency->getThousandsSeparator());
+        $formatter->setAttribute(\NumberFormatter::MAX_FRACTION_DIGITS, $this->currency->getPrecision());
+
+        if (is_callable($callback)) {
+            $callback($formatter);
+        }
+
+        return $formatter->formatCurrency($this->getValue(), $this->currency->getCurrency());
     }
 
     public function toArray(): array
